@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.local
+npm-debug.log*
+logs/
+*.log
+uploads/patients/*
+uploads/lab-reports/*
+uploads/misc/*
+!uploads/patients/.gitkeep
+!uploads/lab-reports/.gitkeep
+!uploads/misc/.gitkeep
+.DS_Store
+coverage/
+dist/

@@ -1,0 +1,340 @@
+rules_version = '2';
+
+// firestore.rules
+//
+// With no backend server, this file IS the authorization layer - there
+// is no Express middleware behind it double-checking anything. Every
+// role rule that used to live in server/src/middleware/rbac.middleware.js
+// + each controller's ownership checks now lives here instead.
+//
+// WHY get() ON A users/{uid} DOCUMENT INSTEAD OF CUSTOM CLAIMS:
+// Firebase Auth custom claims (the usual way to put a "role" on a user
+// so rules can read request.auth.token.role directly, with zero extra
+// reads) can only be SET using the Admin SDK, which requires a trusted
+// server context - normally a Cloud Function. This project intentionally
+// uses zero Cloud Functions (see README - Firebase's Spark-tier Functions
+// policy has changed repeatedly and is not worth depending on). Instead,
+// "role" is a plain field on users/{uid}, and every rule below reads it
+// with get(). Firestore rules cache repeated get() calls to the SAME
+// document within one rule evaluation, so this is one extra read per
+// request, not one per field checked.
+//
+// WHY denormalized *UserId FIELDS APPEAR ON RECORDS:
+// A patient's OWN appointments/records/prescriptions/lab tests need a
+// cheap ownership check. Comparing resource.data.patientId against
+// "the patient record linked to this uid" would need a second get()
+// against the patients collection on every single read. Instead,
+// patientUserId is written directly onto each record at creation time
+// (see FIRESTORE_SCHEMA.md) specifically so the check below is a plain
+// field comparison, not another read.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------
+    // Shared helpers
+    // ---------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function role() {
+      return isSignedIn() ? userDoc().role : null;
+    }
+
+    function isActiveUser() {
+      return isSignedIn() && userDoc().isActive == true;
+    }
+
+    function isAdmin() { return isActiveUser() && role() == 'admin'; }
+    function isDoctor() { return isActiveUser() && role() == 'doctor'; }
+    function isNurse() { return isActiveUser() && role() == 'nurse'; }
+    function isReceptionist() { return isActiveUser() && role() == 'receptionist'; }
+    function isPharmacist() { return isActiveUser() && role() == 'pharmacist'; }
+    function isLabStaff() { return isActiveUser() && role() == 'lab_staff'; }
+    function isPatient() { return isActiveUser() && role() == 'patient'; }
+
+    // "Any clinical/operational staff role" - the equivalent of the old
+    // STAFF_ROLES allowlist used throughout the Express backend.
+    function isStaff() {
+      return isAdmin() || isDoctor() || isNurse() || isReceptionist() || isPharmacist() || isLabStaff();
+    }
+
+    // Only allows the fields in `fields` to differ between the existing
+    // document and the incoming write - the Firestore-rules equivalent
+    // of the old "SAFE_SELF_EDIT_FIELDS allowlist" pattern used for
+    // self-service profile edits.
+    function onlyChangedFields(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(fields);
+    }
+
+    // ---------------------------------------------------------------
+    // counters - internal sequence-number generator (patient codes,
+    // invoice numbers - see generatePatientCode()/generateInvoiceNumber()
+    // in patients.service.js / billing.service.js). Not user-facing
+    // data, just a running integer per year; any staff role that can
+    // create the thing the counter numbers (a patient, an invoice)
+    // needs to read/write it.
+    // ---------------------------------------------------------------
+    match /counters/{counterId} {
+      allow read, write: if isStaff();
+    }
+
+    // ---------------------------------------------------------------
+    // users - the root of the whole authorization system. Every other
+    // rule in this file depends on being able to read this collection,
+    // so its own rules must not create a circular dependency (they
+    // don't - reading your OWN doc, or being admin, never itself
+    // requires reading a doctor/patient doc).
+    // ---------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+
+      // Staff account creation (any role) is admin-only; a receptionist
+      // may additionally create a patient-role account (granting portal
+      // access to an existing patient), matching the old
+      // POST /patients/:id/portal-access endpoint's authorization.
+      allow create: if isAdmin() ||
+        (isReceptionist() && request.resource.data.role == 'patient');
+
+      // Admin can change anything. A user editing their own doc can
+      // only touch contact-type fields - never their own role or active
+      // status (mirrors the old backend's explicit
+      // "you cannot change your own role/deactivate yourself" guards).
+      allow update: if isAdmin() ||
+        (isSignedIn() && request.auth.uid == uid &&
+         onlyChangedFields(['firstName', 'lastName', 'phone', 'updatedAt']));
+
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // doctors - 1:1 profile keyed by the doctor's own uid.
+    //
+    // PUBLIC READ TRADEOFF, stated plainly: the public marketing site
+    // (no login) needs to show a doctor directory. Firestore Security
+    // Rules control access per DOCUMENT, not per FIELD - there is no
+    // rules-only way to expose "just the public-safe fields" of a
+    // document while hiding others the way the old server's
+    // public.controller.js did (it read the full row and returned a
+    // hand-picked subset). The options are: (a) allow public read of
+    // the whole doctors document, meaning fields like licenseNumber,
+    // consultationFee, and roomNumber become technically fetchable by
+    // anyone with the Firebase SDK even though the public UI only ever
+    // displays name/specialization/bio, or (b) maintain a separate,
+    // explicitly-curated `publicDoctors` mirror collection kept in
+    // sync by application code on every profile edit. This migration
+    // takes option (a) for simplicity, on the judgment that a doctor's
+    // license number/consultation fee/room number are operationally
+    // sensitive but not confidential in the way patient data is - if
+    // that judgment doesn't match your actual requirements, build the
+    // mirror collection instead (see FIRESTORE_SCHEMA.md).
+    // ---------------------------------------------------------------
+    match /doctors/{doctorUid} {
+      allow read: if true;
+      // Doctor-specific profile fields (specialization, fee, etc.) are
+      // admin-managed, same as the old system - a doctor's own
+      // schedule lives in the separate doctorAvailability collection
+      // below, which they CAN self-manage.
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /doctorAvailability/{availabilityId} {
+      allow read: if isStaff() || isPatient();
+      allow create: if isAdmin() ||
+        (isDoctor() && request.resource.data.doctorId == request.auth.uid);
+      allow update, delete: if isAdmin() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid);
+    }
+
+    // slotLocks - see FIRESTORE_SCHEMA.md. Anyone who can create an
+    // appointment can claim a lock; anyone who can cancel one can
+    // release it. The deterministic ID itself (doctorId + exact
+    // scheduledAt) is what makes "does this exact slot already have a
+    // lock" a single cheap existence check rather than a query.
+    match /slotLocks/{lockId} {
+      allow read: if isStaff() || isPatient();
+      allow create: if isAdmin() || isReceptionist() || isPatient();
+      allow delete: if isAdmin() || isReceptionist() || isNurse() || isDoctor() || isPatient();
+      allow update: if false;
+    }
+
+    // ---------------------------------------------------------------
+    // departments - name/description only, always been treated as
+    // non-sensitive (the old system's public marketing site already
+    // exposed these) - safe to read publicly without the doctors
+    // collection's tradeoff above.
+    // ---------------------------------------------------------------
+    match /departments/{departmentId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // patients
+    // ---------------------------------------------------------------
+    match /patients/{patientId} {
+      allow read: if isStaff() || (isPatient() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() || isReceptionist();
+      allow update: if isAdmin() || isReceptionist() ||
+        (isPatient() && resource.data.userId == request.auth.uid &&
+         onlyChangedFields([
+           'phone', 'email', 'address', 'city',
+           'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelation',
+           'updatedAt'
+         ]));
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // appointments
+    // ---------------------------------------------------------------
+    match /appointments/{appointmentId} {
+      allow read: if isAdmin() || isReceptionist() || isNurse() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid) ||
+        (isPatient() && resource.data.patientUserId == request.auth.uid);
+
+      // Staff booking (front desk) and patient self-booking both create
+      // appointments - a patient can only ever create one for
+      // themselves (patientUserId must match their own uid).
+      allow create: if isAdmin() || isReceptionist() ||
+        (isPatient() && request.resource.data.patientUserId == request.auth.uid);
+
+      // Reschedule/cancel/status changes: staff broadly; a doctor only
+      // on their own appointments; a patient only cancelling their own
+      // (enforced more precisely in the app - patients never get a
+      // generic "update anything" path in the UI, only "cancel").
+      allow update: if isAdmin() || isReceptionist() || isNurse() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid) ||
+        (isPatient() && resource.data.patientUserId == request.auth.uid &&
+         onlyChangedFields(['status', 'cancellationReason', 'updatedAt']));
+
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // medicalRecords - read-only for patients, never patient-writable.
+    // ---------------------------------------------------------------
+    match /medicalRecords/{recordId} {
+      allow read: if isAdmin() || isDoctor() || isNurse() ||
+        (isPatient() && resource.data.patientUserId == request.auth.uid);
+      allow create: if isAdmin() || isDoctor();
+      allow update: if isAdmin() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // vitals - staff-only, never patient-readable (matches the
+    // original patient portal build, which did not expose raw vitals).
+    // ---------------------------------------------------------------
+    match /vitals/{vitalId} {
+      allow read: if isAdmin() || isDoctor() || isNurse();
+      allow create: if isAdmin() || isNurse();
+      allow update, delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // prescriptions - read-only for patients, never patient-writable.
+    // ---------------------------------------------------------------
+    match /prescriptions/{prescriptionId} {
+      allow read: if isAdmin() || isPharmacist() || isNurse() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid) ||
+        (isPatient() && resource.data.patientUserId == request.auth.uid);
+      allow create: if isAdmin() || isDoctor();
+      // Covers both the prescribing doctor cancelling their own pending
+      // prescription, and a pharmacist dispensing an item (which
+      // updates one entry inside the `items` array plus the linked
+      // medicines/medicineStock documents, all in one transaction).
+      allow update: if isAdmin() || isPharmacist() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Pharmacy
+    // ---------------------------------------------------------------
+    match /medicineCategories/{categoryId} {
+      allow read: if isStaff();
+      allow create, update, delete: if isAdmin() || isPharmacist();
+    }
+
+    match /medicines/{medicineId} {
+      allow read: if isStaff();
+      // Pharmacists manage the full catalog AND stock, matching their
+      // existing "Manage Medicine Inventory" capability - not a new,
+      // broader grant than the old system had.
+      allow create, update: if isAdmin() || isPharmacist();
+      allow delete: if isAdmin();
+    }
+
+    match /medicineStock/{stockId} {
+      allow read: if isStaff();
+      allow create, update: if isAdmin() || isPharmacist();
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Laboratory
+    // ---------------------------------------------------------------
+    match /labTests/{testId} {
+      allow read: if isAdmin() || isLabStaff() || isNurse() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid) ||
+        (isPatient() && resource.data.patientUserId == request.auth.uid &&
+         resource.data.status == 'completed');
+      allow create: if isAdmin() || isDoctor();
+      // Lab staff move status forward and upload the result; the
+      // requesting doctor marks it reviewed - both are "update" on the
+      // same document, distinguished by which fields actually change
+      // in the application layer rather than further rule granularity,
+      // to keep this file readable.
+      allow update: if isAdmin() || isLabStaff() ||
+        (isDoctor() && resource.data.doctorId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Billing - staff-only in this migration, matching the original
+    // patient portal's scope (it never exposed a "My Bills" page).
+    // ---------------------------------------------------------------
+    match /invoices/{invoiceId} {
+      allow read, create, update: if isAdmin() || isReceptionist();
+      allow delete: if isAdmin();
+    }
+
+    // ---------------------------------------------------------------
+    // Notifications - always self-scoped to read/mark-read, but ANY
+    // signed-in user can create one addressed to someone else (booking
+    // an appointment creates a notification for the doctor, for
+    // example) - that's a deliberate, bounded exception: worst case of
+    // abusing it is notification spam, not a data-confidentiality
+    // issue, since the notification's own content is chosen by the
+    // creator and never exposes another user's private data by itself.
+    // ---------------------------------------------------------------
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid &&
+        onlyChangedFields(['isRead']);
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // ---------------------------------------------------------------
+    // Audit logs - append-only from the client's perspective. Must
+    // self-attribute (userId has to be the actual signed-in user - you
+    // cannot write a log entry claiming to be someone else), readable
+    // by admins only, and never editable or deletable by anyone once
+    // written, from any role including admin - an audit trail that can
+    // be edited after the fact isn't an audit trail.
+    // ---------------------------------------------------------------
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}

@@ -1,0 +1,184 @@
+# docker-compose.yml
+# Brings up the entire Hospital Management System with one command:
+#
+#   docker compose up --build
+#
+# Services: mysql -> backend -> frontend, plus phpmyadmin alongside
+# mysql for database administration. Startup order and readiness are
+# enforced with healthchecks (see each service below) rather than fixed
+# delays, so the stack is reliable on both a fast CI runner and a slow
+# laptop.
+#
+# Copy .env.example to .env in this same directory before running -
+# every ${VARIABLE} below falls back to a safe default if you don't,
+# but you should still set real secrets for anything beyond local dev.
+
+services:
+  # -----------------------------------------------------------------
+  # MySQL 8 - the system of record for every module.
+  # -----------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: hms-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_change_me}
+      MYSQL_DATABASE: ${DB_NAME:-hospital_management_system}
+      MYSQL_USER: ${DB_USER:-hms_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-hms_password_change_me}
+    ports:
+      # host:container - change DB_HOST_PORT in .env if 3306 is already
+      # taken by a local MySQL install.
+      - '${DB_HOST_PORT:-3306}:3306'
+    volumes:
+      # Named volume so the database survives `docker compose down` (and
+      # container recreation in general) - only `down -v` removes it.
+      - mysql_data:/var/lib/mysql
+      # MySQL's official image automatically runs every .sql/.sh file in
+      # /docker-entrypoint-initdb.d, in filename order, but ONLY the very
+      # first time it starts with an empty data directory. That's what
+      # "automatically create the hospital database" means here: schema.sql
+      # creates every table, seed.sql inserts roles/departments/medicine
+      # categories. (The bcrypt-hashed admin account is created separately
+      # by the backend's entrypoint, since hashing needs Node - see
+      # server/docker-entrypoint.sh.)
+      - ./server/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./server/database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'root', '-p${DB_ROOT_PASSWORD:-root_change_me}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hms-network
+
+  # -----------------------------------------------------------------
+  # phpMyAdmin - point-and-click database administration for `mysql`.
+  # -----------------------------------------------------------------
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: hms-phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      # Setting PMA_USER/PMA_PASSWORD switches phpMyAdmin to "config"
+      # auth mode, which logs you in automatically instead of showing a
+      # login form - convenient for local development.
+      PMA_USER: root
+      PMA_PASSWORD: ${DB_ROOT_PASSWORD:-root_change_me}
+      UPLOAD_LIMIT: 64M
+    ports:
+      - '${PHPMYADMIN_PORT:-8080}:80'
+    networks:
+      - hms-network
+
+  # -----------------------------------------------------------------
+  # Backend - Node.js / Express API.
+  # -----------------------------------------------------------------
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: hms-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        # Waits for MySQL's healthcheck to pass (not just for the
+        # container to start) before this container is even created -
+        # server/docker-entrypoint.sh then adds a second, application-
+        # level wait on top of that for extra safety.
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      API_PREFIX: /api/v1
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
+
+      # Talks to MySQL using the Docker Compose SERVICE NAME "mysql" as
+      # the host - not "localhost". Inside the Docker network, each
+      # service is resolvable by its service name; "localhost" from
+      # inside the backend container would mean the backend container
+      # itself, which has no MySQL running on it.
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:-hms_user}
+      DB_PASSWORD: ${DB_PASSWORD:-hms_password_change_me}
+      DB_NAME: ${DB_NAME:-hospital_management_system}
+
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev_access_secret_please_change_me}
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_refresh_secret_please_change_me}
+      JWT_REFRESH_EXPIRES_IN: 7d
+      JWT_REFRESH_EXPIRES_IN_REMEMBER_ME: 30d
+      COOKIE_SECRET: ${COOKIE_SECRET:-dev_cookie_secret_please_change_me}
+      COOKIE_SECURE: 'false'
+
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@hms.local}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
+    ports:
+      - '5000:5000'
+    volumes:
+      # Persists uploaded patient photos / lab reports / attachments
+      # across container restarts and rebuilds.
+      - uploads_data:/app/uploads
+      # Bind-mounts the single DEMO_USERS.md file (not a whole directory)
+      # so when the seed script (re)writes it inside the container, the
+      # change is immediately visible on the host too. Docker requires
+      # this file to already exist on the host before first `up` - it's
+      # included in the repo for exactly that reason.
+      - ./DEMO_USERS.md:/app/DEMO_USERS.md
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:5000/api/v1/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - hms-network
+
+  # -----------------------------------------------------------------
+  # Frontend - React (Vite) dev server with hot reload.
+  # -----------------------------------------------------------------
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: hms-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # This is what the code running in the BROWSER uses to reach the
+      # API - the browser is on the host machine, not inside the Docker
+      # network, so it must use the port docker-compose published to
+      # the host (localhost:5000), not the internal service name.
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:5000/api/v1}
+      # This is only for Vite's own dev-server-side proxy (used if any
+      # code calls a relative /api/... path) - that proxy runs INSIDE
+      # the container, so it correctly uses the internal service name.
+      VITE_API_PROXY_TARGET: http://backend:5000
+    ports:
+      - '5173:5173'
+    volumes:
+      # Bind-mount the source for hot reload...
+      - ./client:/app
+      # ...but keep node_modules from inside the image, so the mount
+      # above doesn't shadow it with (possibly absent, or wrong-OS-built)
+      # node_modules from the host.
+      - /app/node_modules
+    networks:
+      - hms-network
+
+networks:
+  hms-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  uploads_data:

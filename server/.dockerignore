@@ -1,0 +1,34 @@
+# server/.dockerignore
+# Keeps the backend build context (and therefore image layers) small,
+# and prevents host-specific or secret files from ever being copied
+# into the image.
+
+node_modules
+npm-debug.log*
+
+# Environment files - real secrets never belong in an image; they're
+# injected at container run time via docker-compose.
+.env
+.env.local
+.env.*.local
+
+# Local runtime data - regenerated inside the container / persisted via
+# the uploads_data volume instead.
+uploads/patients/*
+uploads/lab-reports/*
+uploads/misc/*
+!uploads/patients/.gitkeep
+!uploads/lab-reports/.gitkeep
+!uploads/misc/.gitkeep
+logs/
+*.log
+
+# VCS / editor / OS cruft
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+# Docs unrelated to the runtime image
+README.md

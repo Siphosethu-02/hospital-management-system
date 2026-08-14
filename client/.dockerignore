@@ -1,0 +1,26 @@
+# client/.dockerignore
+# Keeps the frontend build context small and stops the host's
+# node_modules/dist (which may be built for the wrong OS/arch) from ever
+# being copied into the image - the container installs its own.
+
+node_modules
+dist
+build
+
+# Environment files - injected at container run time via docker-compose,
+# never baked into the image.
+.env
+.env.local
+.env.*.local
+
+# VCS / editor / OS cruft
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+npm-debug.log*
+*.log
+
+README.md

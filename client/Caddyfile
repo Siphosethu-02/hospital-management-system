@@ -1,0 +1,40 @@
+# client/Caddyfile
+# Caddy config for the production image (see Dockerfile.prod). Caddy
+# gets you automatic, auto-renewing HTTPS from Let's Encrypt for free,
+# with no certbot, no cron job, no manual renewal - it "just works" as
+# long as {$DOMAIN} is a real domain name pointed at this server's IP
+# and ports 80/443 are reachable from the internet.
+#
+# {$DOMAIN} is substituted from the DOMAIN environment variable set on
+# the "web" service in docker-compose.prod.yml.
+#
+# No domain yet / just testing on a bare IP? Set DOMAIN=:80 in your .env
+# instead - Caddy will serve plain HTTP on port 80 with no certificate
+# lookup, so you can verify everything works before pointing a real
+# domain at it.
+
+{$DOMAIN}
+
+# API requests - proxied to the backend container by its Docker Compose
+# service name. This is what makes the frontend and backend appear as
+# the same origin to the browser, eliminating CORS and cross-site
+# cookie configuration entirely.
+handle /api/* {
+	reverse_proxy backend:5000
+}
+
+# Uploaded files (patient photos, lab reports) - served by the backend,
+# same reasoning as /api above.
+handle /uploads/* {
+	reverse_proxy backend:5000
+}
+
+# Everything else: the built single-page app. try_files falls back to
+# index.html for any path that isn't a real static file, so client-side
+# routes (e.g. /app/dashboard) don't 404 on a hard refresh.
+handle {
+	root * /srv
+	try_files {path} /index.html
+	file_server
+	encode gzip
+}

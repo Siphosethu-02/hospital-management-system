@@ -1,0 +1,4 @@
+# Never commit this - it's a private key granting full admin access to
+# your Firebase project (Firestore, Auth, everything).
+serviceAccountKey.json
+node_modules/

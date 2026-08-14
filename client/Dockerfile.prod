@@ -1,0 +1,42 @@
+# client/Dockerfile.prod
+# Production image - NOT used by the local dev docker-compose.yml (that
+# one intentionally runs the Vite dev server for hot reload - see
+# client/Dockerfile). This one builds the real static bundle and serves
+# it from Caddy, which also reverse-proxies /api and /uploads to the
+# backend container. The result: ONE public-facing container, ONE URL,
+# automatic HTTPS - no separate frontend host, no CORS, no cross-site
+# cookie configuration needed, because the browser sees everything as
+# the same origin.
+#
+# Built and run via docker-compose.prod.yml, not this Dockerfile alone.
+
+# ---------------------------------------------------------------------
+# Stage 1: build the static React bundle
+# ---------------------------------------------------------------------
+FROM node:20-alpine AS build
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# Vite bakes env vars into the bundle at BUILD time, not runtime - this
+# is a build arg (not just an ENV) so docker-compose.prod.yml can pass
+# it in via `args:`. Defaulting to a relative path is what makes the
+# "one origin, no CORS" setup work: the browser calls /api/v1/... on
+# whatever domain it's already loaded from, and Caddy (see Caddyfile)
+# routes that to the backend container internally.
+ARG VITE_API_URL=/api/v1
+ENV VITE_API_URL=$VITE_API_URL
+RUN npm run build
+
+# ---------------------------------------------------------------------
+# Stage 2: serve the bundle + reverse-proxy the API, via Caddy
+# ---------------------------------------------------------------------
+FROM caddy:2-alpine
+
+COPY --from=build /app/dist /srv
+COPY Caddyfile /etc/caddy/Caddyfile
+
+EXPOSE 80 443

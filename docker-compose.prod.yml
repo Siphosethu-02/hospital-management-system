@@ -1,0 +1,150 @@
+# docker-compose.prod.yml
+# Deploys the ENTIRE Hospital Management System as one unit, on one
+# server - this is the "everything in one place" alternative to
+# splitting the frontend/backend/database across separate platforms
+# (Vercel/Render/managed MySQL). Usage:
+#
+#   docker compose -f docker-compose.prod.yml up --build -d
+#
+# Only ONE service (`web`) is reachable from the internet, on ports
+# 80/443. `backend` and `mysql` are only reachable from inside the
+# Docker network - Caddy (in `web`) reverse-proxies /api and /uploads
+# to `backend` internally, so there's no separate API domain, no CORS
+# configuration, and no cross-site cookie configuration to get right:
+# the browser sees one origin.
+#
+# This is the production counterpart to docker-compose.yml (which runs
+# the frontend as a dev server with hot reload, for local development) -
+# they're separate files on purpose so `docker compose up` for local dev
+# is never accidentally affected by production settings, or vice versa.
+#
+# Copy .env.example to .env in this same directory first (same file the
+# dev compose uses) and additionally set DOMAIN - see .env.example for
+# what that needs to be.
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: hms-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set a real DB_ROOT_PASSWORD in .env for production}
+      MYSQL_DATABASE: ${DB_NAME:-hospital_management_system}
+      MYSQL_USER: ${DB_USER:-hms_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set a real DB_PASSWORD in .env for production}
+    # No `ports:` here on purpose - unlike the dev compose file, MySQL
+    # is not published to the host at all in production, only reachable
+    # from other containers on hms-network. If you need to inspect the
+    # database, use `docker compose -f docker-compose.prod.yml exec mysql mysql ...`
+    # or open an SSH tunnel rather than exposing 3306 to the internet.
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./server/database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./server/database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'root', '-p${DB_ROOT_PASSWORD}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hms-network
+
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: hms-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      API_PREFIX: /api/v1
+      # Same origin as the frontend in this setup (Caddy serves both) -
+      # still set explicitly since it's also used for CORS.
+      CLIENT_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env, e.g. https://your-domain.com}
+
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:-hms_user}
+      DB_PASSWORD: ${DB_PASSWORD:?Set a real DB_PASSWORD in .env for production}
+      DB_NAME: ${DB_NAME:-hospital_management_system}
+
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set a real JWT_ACCESS_SECRET in .env - e.g. openssl rand -hex 64}
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set a real JWT_REFRESH_SECRET in .env - e.g. openssl rand -hex 64}
+      JWT_REFRESH_EXPIRES_IN: 7d
+      JWT_REFRESH_EXPIRES_IN_REMEMBER_ME: 30d
+      COOKIE_SECRET: ${COOKIE_SECRET:?Set a real COOKIE_SECRET in .env - e.g. openssl rand -hex 64}
+      # true in production: makes the refresh cookie HTTPS-only and
+      # SameSite=None-capable (see src/controllers/auth.controller.js) -
+      # required because Caddy terminates HTTPS in front of this
+      # container, so from the browser's perspective the whole site is
+      # served over HTTPS even though this container itself speaks
+      # plain HTTP internally.
+      COOKIE_SECURE: 'true'
+
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@hms.local}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?Set a real SEED_ADMIN_PASSWORD in .env for production}
+    # No `ports:` here either - only reachable via Caddy's internal
+    # reverse proxy (see client/Caddyfile), never directly from outside.
+    volumes:
+      - uploads_data:/app/uploads
+      - ./DEMO_USERS.md:/app/DEMO_USERS.md
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:5000/api/v1/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - hms-network
+
+  # The ONLY service published to the internet. Builds the real static
+  # frontend bundle and serves it, while reverse-proxying API calls to
+  # `backend` - see client/Dockerfile.prod and client/Caddyfile.
+  web:
+    build:
+      context: ./client
+      dockerfile: Dockerfile.prod
+      args:
+        # Relative path, not an absolute URL - the browser calls
+        # /api/v1/... on whatever domain it already loaded the page
+        # from, and Caddy routes that to `backend` internally. This is
+        # what makes frontend and backend appear as the same origin.
+        VITE_API_URL: /api/v1
+    container_name: hms-web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # Your real domain (e.g. hms.example.com), or ":80" to run plain
+      # HTTP on a bare IP with no certificate lookup while testing -
+      # see the comment at the top of client/Caddyfile.
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env - a real domain name, or ":80" to test without HTTPS}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      # Persists Caddy's auto-obtained Let's Encrypt certificates across
+      # restarts - without this, every restart would re-request a fresh
+      # certificate, and Let's Encrypt rate-limits how often you can do
+      # that for the same domain.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - hms-network
+
+networks:
+  hms-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  uploads_data:
+  caddy_data:
+  caddy_config:

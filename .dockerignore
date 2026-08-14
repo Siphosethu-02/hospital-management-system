@@ -1,0 +1,41 @@
+# .dockerignore (project root)
+#
+# NOTE: docker-compose builds each service from its own context
+# (./client and ./server - see docker-compose.yml), and Docker only
+# honors a .dockerignore file that lives IN that build context. That
+# means client/.dockerignore and server/.dockerignore are the ones that
+# actually apply day to day; this root-level file exists for parity
+# with the requested project structure and covers you if you ever build
+# an image directly from the repo root (e.g. `docker build .` for some
+# other tooling).
+
+node_modules
+**/node_modules
+
+dist
+build
+**/dist
+
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+logs
+**/logs
+*.log
+
+uploads/patients/*
+uploads/lab-reports/*
+uploads/misc/*
+!uploads/**/.gitkeep
+
+.git
+.gitignore
+.DS_Store
+.vscode
+.idea
+
+README.md
+docker-compose.yml
