@@ -40,7 +40,8 @@ export default function PublicNavbar() {
               {link.label}
             </NavLink>
           ))}
-          <Link to="/login" className="btn-primary">Staff Login</Link>
+          <Link to="/login" className="text-sm font-medium text-gray-600 hover:text-primary-600 dark:text-gray-300">Sign in</Link>
+          <Link to="/register" className="btn-primary">Create account</Link>
         </nav>
 
         <button className="md:hidden" onClick={() => setOpen((o) => !o)}>
@@ -60,8 +61,15 @@ export default function PublicNavbar() {
               {link.label}
             </NavLink>
           ))}
-          <Link to="/login" onClick={() => setOpen(false)} className="btn-primary mt-2 justify-center">
-            Staff Login
+          <Link
+            to="/login"
+            onClick={() => setOpen(false)}
+            className="rounded-lg px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            Sign in
+          </Link>
+          <Link to="/register" onClick={() => setOpen(false)} className="btn-primary mt-2 justify-center">
+            Create account
           </Link>
         </nav>
       )}

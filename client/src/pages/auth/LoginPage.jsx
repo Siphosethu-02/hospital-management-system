@@ -39,7 +39,7 @@ export default function LoginPage() {
             <FiHeart className="h-6 w-6 text-white" />
           </div>
           <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">MediCare HMS</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to your staff account</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to your account</p>
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="card space-y-4 p-6">
@@ -93,6 +93,10 @@ export default function LoginPage() {
         </form>
 
         <p className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
+          New patient?{' '}
+          <Link to="/register" className="font-medium text-primary-600 hover:underline">Create an account</Link>
+        </p>
+        <p className="mt-2 text-center text-sm text-gray-500 dark:text-gray-400">
           <Link to="/" className="text-primary-600 hover:underline">← Back to homepage</Link>
         </p>
       </div>

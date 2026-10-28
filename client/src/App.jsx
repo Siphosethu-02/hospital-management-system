@@ -15,6 +15,7 @@ import DepartmentsPublicPage from './pages/public/DepartmentsPublicPage';
 import DoctorsPublicPage from './pages/public/DoctorsPublicPage';
 import ContactPage from './pages/public/ContactPage';
 import LoginPage from './pages/auth/LoginPage';
+import SignUpPage from './pages/auth/SignUpPage';
 
 // App (authenticated)
 import DashboardPage from './pages/dashboard/DashboardPage';
@@ -63,6 +64,7 @@ export default function App() {
         </Route>
 
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<SignUpPage />} />
 
         {/* Authenticated app */}
         <Route

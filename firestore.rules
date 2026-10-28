@@ -82,6 +82,17 @@ service cloud.firestore {
     // ---------------------------------------------------------------
     match /counters/{counterId} {
       allow read, write: if isStaff();
+
+      // Patient self sign-up takes the next patient code itself. A
+      // patient may only read the patient counter and move it up by
+      // exactly one - never jump it, reset it, or touch other counters.
+      allow read: if isPatient() && counterId.matches('patients-[0-9]{4}');
+      allow create: if isPatient() && counterId.matches('patients-[0-9]{4}') &&
+        request.resource.data.keys().hasOnly(['value']) &&
+        request.resource.data.value == 1;
+      allow update: if isPatient() && counterId.matches('patients-[0-9]{4}') &&
+        request.resource.data.keys().hasOnly(['value']) &&
+        request.resource.data.value == resource.data.value + 1;
     }
 
     // ---------------------------------------------------------------
@@ -98,8 +109,21 @@ service cloud.firestore {
       // may additionally create a patient-role account (granting portal
       // access to an existing patient), matching the old
       // POST /patients/:id/portal-access endpoint's authorization.
+      //
+      // Public sign-up: a newly signed-in person may create THEIR OWN
+      // users doc, but only as an active patient, only with their own
+      // sign-in email, and only with these fields - so nobody can sign
+      // themselves up as a doctor or admin.
       allow create: if isAdmin() ||
-        (isReceptionist() && request.resource.data.role == 'patient');
+        (isReceptionist() && request.resource.data.role == 'patient') ||
+        (isSignedIn() && request.auth.uid == uid &&
+         request.resource.data.role == 'patient' &&
+         request.resource.data.isActive == true &&
+         request.resource.data.email == request.auth.token.email &&
+         request.resource.data.keys().hasOnly([
+           'role', 'firstName', 'lastName', 'email', 'phone',
+           'isActive', 'selfRegistered', 'createdAt', 'updatedAt'
+         ]));
 
       // Admin can change anything. A user editing their own doc can
       // only touch contact-type fields - never their own role or active
@@ -179,7 +203,28 @@ service cloud.firestore {
     // ---------------------------------------------------------------
     match /patients/{patientId} {
       allow read: if isStaff() || (isPatient() && resource.data.userId == request.auth.uid);
-      allow create: if isAdmin() || isReceptionist();
+      // Self sign-up: a patient may create exactly one record for
+      // themselves - its document ID must be their own uid (so a second
+      // one is impossible), it must be linked to them, and medical /
+      // insurance fields start empty for staff to fill in.
+      allow create: if isAdmin() || isReceptionist() ||
+        (isPatient() && patientId == request.auth.uid &&
+         request.resource.data.userId == request.auth.uid &&
+         request.resource.data.registeredBy == request.auth.uid &&
+         request.resource.data.isActive == true &&
+         request.resource.data.patientCode is string &&
+         request.resource.data.allergies == null &&
+         request.resource.data.chronicConditions == null &&
+         request.resource.data.insuranceProvider == null &&
+         request.resource.data.insurancePolicyNumber == null &&
+         request.resource.data.keys().hasOnly([
+           'patientCode', 'userId', 'firstName', 'lastName', 'dateOfBirth', 'gender',
+           'bloodGroup', 'phone', 'email', 'address', 'city', 'allergies',
+           'chronicConditions', 'emergencyContactName', 'emergencyContactPhone',
+           'emergencyContactRelation', 'insuranceProvider', 'insurancePolicyNumber',
+           'profileImageData', 'registeredBy', 'registeredByName', 'isActive',
+           'createdAt', 'updatedAt'
+         ]));
       allow update: if isAdmin() || isReceptionist() ||
         (isPatient() && resource.data.userId == request.auth.uid &&
          onlyChangedFields([

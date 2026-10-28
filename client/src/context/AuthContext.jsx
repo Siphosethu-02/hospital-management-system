@@ -5,7 +5,7 @@
 // restored, changes, or clears - so that listener IS the source of
 // truth here, not a manual API call on mount.
 
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../firebase/config';
 import { authService, buildUserProfile } from '../services/auth.service';
@@ -15,6 +15,10 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  // During sign-up, Firebase signs the new user in BEFORE their
+  // users/{uid} profile exists. Without this flag the listener below
+  // would see "no profile" and wipe the user out mid-sign-up.
+  const signingUp = useRef(false);
 
   useEffect(() => {
     // Fires once immediately with whatever session Firebase already
@@ -22,6 +26,7 @@ export function AuthProvider({ children }) {
     // future sign-in/sign-out - this single listener replaces the old
     // mount-time refresh() call entirely.
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (signingUp.current) return; // signUp() sets the user itself when done
       if (!firebaseUser) {
         setUser(null);
         setIsLoading(false);
@@ -51,6 +56,17 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
+  const signUp = useCallback(async (details) => {
+    signingUp.current = true;
+    try {
+      const { data } = await authService.signUp(details);
+      setUser(data.user);
+      return data.user;
+    } finally {
+      signingUp.current = false;
+    }
+  }, []);
+
   const logout = useCallback(async () => {
     await authService.logout();
     setUser(null);
@@ -63,7 +79,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout, refreshCurrentUser, setUser }}>
+    <AuthContext.Provider value={{ user, isLoading, login, signUp, logout, refreshCurrentUser, setUser }}>
       {children}
     </AuthContext.Provider>
   );
