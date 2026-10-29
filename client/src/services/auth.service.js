@@ -17,7 +17,7 @@ import {
   EmailAuthProvider,
   createUserWithEmailAndPassword,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, query, collection, where, getDocs, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, query, collection, where, getDocs, serverTimestamp, runTransaction } from 'firebase/firestore';
 import { auth, db, getSecondaryAuth } from '../firebase/config';
 import { withLegacyAliases } from '../firebase/firestoreUtils';
 
@@ -129,6 +129,84 @@ export const authService = {
     } finally {
       await signOut(secondaryAuth);
     }
+  },
+
+  /**
+   * Public patient self sign-up (the "Create account" page).
+   *
+   * Only ever creates a PATIENT account - staff accounts are still
+   * admin-only via register() above, and firestore.rules enforces that
+   * (a self-created users/{uid} doc must have role 'patient').
+   *
+   * Steps, in this order because each rule check depends on the one
+   * before it:
+   *   1. Create the Firebase Auth user (this also signs them in).
+   *   2. Create users/{uid} with role 'patient'.
+   *   3. In one transaction, take the next PT-YYYY-###### code and
+   *      create the linked patients/{uid} record. Using the uid as the
+   *      document ID means one person can only ever get one record.
+   */
+  signUp: async ({ firstName, lastName, email, password, phone, dateOfBirth, gender }) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const credential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+    const uid = credential.user.uid;
+
+    try {
+      await setDoc(doc(db, 'users', uid), {
+        role: 'patient',
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        email: cleanEmail,
+        phone: phone || null,
+        isActive: true,
+        selfRegistered: true,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      await runTransaction(db, async (tx) => {
+        const year = new Date().getFullYear();
+        const counterRef = doc(db, 'counters', `patients-${year}`);
+        const counterSnap = await tx.get(counterRef);
+        const next = (counterSnap.exists() ? counterSnap.data().value : 0) + 1;
+        tx.set(counterRef, { value: next });
+
+        tx.set(doc(db, 'patients', uid), {
+          patientCode: `PT-${year}-${String(next).padStart(6, '0')}`,
+          userId: uid,
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          dateOfBirth,
+          gender,
+          bloodGroup: null,
+          phone: phone || null,
+          email: cleanEmail,
+          address: null,
+          city: null,
+          allergies: null,
+          chronicConditions: null,
+          emergencyContactName: null,
+          emergencyContactPhone: null,
+          emergencyContactRelation: null,
+          insuranceProvider: null,
+          insurancePolicyNumber: null,
+          profileImageData: null,
+          registeredBy: uid,
+          registeredByName: 'Self sign-up',
+          isActive: true,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      });
+    } catch (err) {
+      // Don't leave a half-made login behind - remove the Auth user so
+      // the same email can simply try again.
+      try { await credential.user.delete(); } catch { /* ignore */ }
+      throw err;
+    }
+
+    const profile = await buildUserProfile(uid);
+    return { data: { user: profile } };
   },
 
   changePassword: async ({ currentPassword, newPassword }) => {

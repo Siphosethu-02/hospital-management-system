@@ -30,6 +30,8 @@ createdAt, updatedAt
 
 ### `patients/{patientId}` (auto-ID)
 Not keyed by UID, because most patients in a hospital system never get a portal login - `userId` is null until an admin/receptionist grants one.
+
+**Exception - patient self sign-up (`/register`):** a patient who creates their own account gets a record whose document ID **is** their uid (`patients/{uid}`), with `registeredBy` = their uid and `registeredByName` = "Self sign-up". Using the uid as the ID is what lets `firestore.rules` guarantee one self-made record per person without a query. Medical and insurance fields start as `null` for staff to fill in.
 ```
 patientCode, userId (nullable - links to users/{uid} once portal access exists)
 firstName, lastName, dateOfBirth, gender, bloodGroup
