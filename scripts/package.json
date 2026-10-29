@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "migrate": "node migrate-to-firestore.js",
-    "demo-accounts": "node create-demo-accounts.js"
+    "demo-accounts": "node create-demo-accounts.js",
+    "demo-data": "node create-demo-data.js"
   },
   "dependencies": {
     "firebase-admin": "^12.3.1",
